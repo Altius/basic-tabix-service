@@ -1,6 +1,8 @@
 # basic-tabix-service
 A nodejs-based service for requests for tabix-indexed genomic data
 
+**Note**: At this time, the client will not work as written as it requires updating to reflect July 2020 changes to the underlying tabix service. 
+
 ## Prerequisites
 
 These instructions assume a CentOS 7 host and sudo-level access. It's probably easiest to set up a virtual host and run these tests within that host.
