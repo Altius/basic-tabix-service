@@ -1,101 +1,152 @@
 #!/usr/bin/env node
 
-var TabixServer = TabixServer || {};
+const express = require('express');
+const request = require('request');
+const https = require('https');
+const fs = require('fs');
+const debug = require('debug')('tabix-service:server');
+const normalizePort = require('normalize-port');
+const nocache = require('nocache');
+const morgan = require('morgan');
+const cp = require('child_process');
+const spawn = cp.spawn;
 
-var express = require('express');
-var request = require('request');
-var url = require('url');
-var valid_url = require('valid-url');
-var fs = require('fs');
-var path = require('path');
-var winston = require('winston');
-var child_process = require('child_process');
+const app = module.exports = express();
 
-TabixServer.App = express();
+/**
+ * Listen
+ */
+ 
+const defaultPort = 9003;
 
-TabixServer.DefaultPort = 1234;
+let port = normalizePort(process.env.PORT || defaultPort);
+app.set('port', port);
 
-TabixServer.CurrentDir = process.cwd();
+let byteLimit = (process.env.BYTELIMIT || 1024*1024);
+// let lineLimit = (process.env.LINELIMIT || 100);
 
-TabixServer.Datasets = {
-    SAMPLE : { 'name' : 'sample', 'path' : 'archives/sample.bed.gz' }
+let privateKeyFn = (process.env.SSLPRIVATEKEY || '/etc/ssl/private/altius.org.key');
+let certificateFn = (process.env.SSLCERTIFICATE || '/etc/ssl/certs/altius-bundle.crt');
+
+let privateKey = fs.readFileSync(privateKeyFn);
+let certificate = fs.readFileSync(certificateFn);
+
+const options = {
+  key: privateKey,
+  cert: certificate
 };
 
-TabixServer.Logger = new (winston.Logger)({
-    transports: [
-	new (winston.transports.Console)({
-	    json: false,
-	    colorize: true,
-	    timestamp: true
-	})
-    ]
+let server = https.createServer(options, app);
+server.listen(port);
+server.on('error', onError);
+server.on('listening', onListening);
+
+/**
+ * Event listener for HTTP server "error" event.
+ */
+
+function onError(error) {
+  if (error.syscall !== 'listen') {
+    throw error;
+  }
+
+  let bind = typeof port === 'string'
+    ? 'Pipe ' + port
+    : 'Port ' + port;
+
+  // handle specific listen errors with friendly messages
+  switch (error.code) {
+    case 'EACCES':
+      console.error(bind + ' requires elevated privileges');
+      process.exit(1);
+      break;
+    case 'EADDRINUSE':
+      console.error(bind + ' is already in use');
+      process.exit(1);
+      break;
+    default:
+      throw error;
+  }
+}
+
+/**
+ * Event listener for HTTP server "listening" event.
+ */
+
+function onListening() {
+  let addr = server.address();
+  let bind = typeof addr === 'string'
+    ? 'pipe ' + addr
+    : 'port ' + addr.port;
+  debug('Listening on ' + bind);
+}
+
+/**
+ * Allow CORS
+ */
+
+function cors(req, res, next) {
+  res.set('Access-Control-Allow-Origin', req.headers.origin);
+  res.set('Access-Control-Allow-Methods', req.method);
+  res.set('Access-Control-Allow-Headers', 'X-Requested-With, Content-Type');
+  res.set('Access-Control-Allow-Credentials', true);
+
+  // Respond OK if the method is OPTIONS
+  if (req.method === 'OPTIONS') {
+    return res.send(200);
+  } else {
+    return next();
+  }
+}
+
+/**
+ * Response, CORS, cache policy and logging
+ */
+
+app.use(cors);
+app.use(nocache());
+app.use(morgan('combined'));
+
+const datasets = {
+  SAMPLE : { 'name' : 'sample', 'path' : 'archives/sample.bed.gz' }
+};
+
+app.get('/favicon.ico', (req, res) => {
+  res.sendStatus(404);
 });
 
-TabixServer.NormalizePort = function(val) {
-    var port = parseInt(val, 10);
-    if (isNaN(port)) {
-        // named pipe
-        return val;
-    }
-    if (port >= 0) {
-        // port number
-        return port;
-    }
-    return false;
-};
-
-TabixServer.App.use('/', function(req, res, next) {
-    TabixServer.Logger.info(`request url: ${req.url}`);
-    var requestCorrect = true;
-    if (req.method == 'GET') {
-	var query = url.parse(req.url, true).query;
-	var queryStr = JSON.stringify(query);
-	TabixServer.Logger.info(`request query: ${queryStr}`);
-	if (query.dataset) {
-	    if (query.dataset == TabixServer.Datasets.SAMPLE.name) {
-		if (query.chr && query.start && query.stop) {
-		    res.writeHead(200, {
-			"Content-Type": "text/plain",
-			"Cache-control": "no-cache",
-			"Access-Control-Allow-Origin": "*",
-		    });
-		    var tabixArchive = path.join(TabixServer.CurrentDir, TabixServer.Datasets.SAMPLE.path);
-		    var tabixROI = query.chr + ":" + query.start + "-" + query.stop;
-		    var tabixQuery = child_process.spawn('tabix', [tabixArchive, tabixROI]);
-		    var tabixResult = "";
-
-		    tabixQuery.stdout.pipe(res);
-
-		    tabixQuery.stderr.on('data', function(data) {
-			TabixServer.Logger.error(`${data}`);
-			res.end('stderr: ' + data);
-		    });
-		}
-		else {
-		    requestCorrect = false;
-		}
-	    }
-	    else {
-		TabixServer.Logger.error(`request dataset name unknown: ${query.dataset}`);
-		res.set({"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"}).status(404).send({ "error" : "Unknown dataset" });
-		return;
-	    }
-	}
-	else {
-	    requestCorrect = false;
-	}
+app.get('/', (req, res, next) => {
+  let tabixPath = decodeURIComponent(req.query.dataset);
+  let tabixRange = decodeURIComponent(req.query.range);
+  
+  let tabixCmdArgs = [tabixPath, tabixRange];
+  let tabixCmd = spawn('/usr/bin/tabix', tabixCmdArgs, { shell: true });
+  console.log(tabixCmd.spawnargs.join(' '));
+  let tabixData = '';
+  tabixCmd.stdout.setEncoding('utf8');
+  tabixCmd.stdout.on('data', function(data) { 
+    tabixData += data.toString(); 
+  });
+  tabixCmd.stdout.on('end', function() { 
+    res.write(tabixData);
+  });
+  tabixCmd.on('close', (tabixCmdExitCode) => {
+    if (tabixCmdExitCode !== 0) {
+      res.status(400).send(`Invalid input or other error (${tabixCmdExitCode})`);
     }
     else {
-	requestCorrect = false;
+      req
+        .pipe(tabixCmd.stdout)
+        .on('response', function(response) {
+          let contentLength = req.socket.bytesRead;
+          if (contentLength > byteLimit) {
+            res.status(400).send("Went over content byte limit");
+          }
+          // Rewrite content header to force it to text
+          response.headers['content-type'] = 'text/plain';
+        })
+        .pipe(res);
     }
-    if (!requestCorrect) {
-	TabixServer.Logger.error(`request malformed`);
-	res.set({"Content-Type": "application/json", "Access-Control-Allow-Origin": "*"}).status(400).send({ "error" : "Malformed request" });	
-    }
-});
-
-var http_port = TabixServer.NormalizePort(process.env.TABIX_SERVER_PORT || TabixServer.DefaultPort);
-
-var http_server = TabixServer.App.listen(http_port, function() {
-    TabixServer.Logger.info(`TabixServer is listening on port ${http_port}`)
+    return;
+  });
 });

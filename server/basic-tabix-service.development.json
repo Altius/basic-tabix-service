@@ -1,0 +1,16 @@
+{
+  apps : [
+    {
+      name: "tabix-service (development)",
+      script: "npm run start",
+      interpreter: "none",
+      watch: false,
+      cwd: "/home/ubuntu/basic-tabix-service/server",
+      env: {
+        "PORT": 9003,
+        "NODE_ENV": "development",
+        "HOST": "0.0.0.0"
+      }
+    }
+  ]
+}
